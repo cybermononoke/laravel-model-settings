@@ -16,27 +16,59 @@ use Illuminate\Support\Arr;
  */
 abstract class AbstractSettingsManager implements SettingsManagerContract
 {
-    /** @var \Illuminate\Database\Eloquent\Model */
+    /** @var Model */
     protected $model;
+
+    /** @var string */
+    protected $fieldName;
 
     /** @var array */
     protected $defaultSettings = [];
 
     /**
      * AbstractSettingsManager constructor.
-     * @param \Illuminate\Database\Eloquent\Model|HasSettings $model
-     * @throws \Glorand\Model\Settings\Exceptions\ModelSettingsException
+     *
+     * @param Model $model
+     * @param string|null $fieldName  JSON column name; if null, uses model's default
+     * @throws ModelSettingsException
      */
-    public function __construct(Model $model)
+    public function __construct(Model $model, string $fieldName = null)
     {
         $this->model = $model;
-        if (!in_array(HasSettings::class, class_uses_recursive($this->model))) {
+
+        if (! in_array(HasSettings::class, class_uses_recursive($model))) {
             throw new ModelSettingsException('Wrong model, missing HasSettings trait.');
         }
+
+        // Determine which JSON column to work with
+        $this->fieldName = $fieldName ?: $model->getSettingsFieldName();
+    }
+
+    /**
+     * Retrieve and decode the JSON from the active column.
+     *
+     * @return array
+     */
+    protected function getSettingsValue(): array
+    {
+        $raw = $this->model->getAttributeValue($this->fieldName) ?? '[]';
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * Retrieve default settings from the model's HasSettings trait.
+     *
+     * @return array
+     */
+    protected function getDefaultSettings(): array
+    {
+        return $this->model->getDefaultSettings();
     }
 
     /**
      * Check if array is associative and not sequential
+     *
      * @param array $arr
      * @return bool
      */
@@ -50,17 +82,16 @@ abstract class AbstractSettingsManager implements SettingsManagerContract
     }
 
     /**
-     * Flatten array with dots for settings package
+     * Flatten an associative array using dot notation
+     *
      * @param array $array
      * @param string $prepend
      * @return array
-     * @SuppressWarnings(PHPMD.ElseExpression)
      */
     public static function dotFlatten(array $array, string $prepend = ''): array
     {
         $results = [];
         foreach ($array as $key => $value) {
-            // only re-run if nested array is associative (key-based)
             if (is_array($value) && static::isAssoc($value) && !empty($value)) {
                 $results = array_merge($results, static::dotFlatten($value, $prepend . $key . '.'));
             } else {
@@ -72,37 +103,38 @@ abstract class AbstractSettingsManager implements SettingsManagerContract
     }
 
     /**
-     * Get nested merged array with all available keys
+     * Get merged array of defaults and stored settings
+     *
      * @return array
      */
     public function all(): array
     {
-        return $this->getMultiple();
+        return array_replace_recursive(
+            $this->getDefaultSettings(),
+            $this->getSettingsValue()
+        );
     }
 
     /**
      * Get flat merged array with dot-notation keys
+     *
      * @return array
      */
     public function allFlattened(): array
     {
-        $flattenedDefaultSettings = static::dotFlatten($this->model->getDefaultSettings());
-        $flattenedSettingsValue = static::dotFlatten($this->model->getSettingsValue());
+        $flattenedDefault = static::dotFlatten($this->getDefaultSettings());
+        $flattenedStored  = static::dotFlatten($this->getSettingsValue());
 
-        return array_merge($flattenedDefaultSettings, $flattenedSettingsValue);
+        return array_merge($flattenedDefault, $flattenedStored);
     }
 
-    /**
-     * @return bool
-     */
+    /** @return bool */
     public function exist(): bool
     {
         return count($this->all()) > 0;
     }
 
-    /**
-     * @return bool
-     */
+    /** @return bool */
     public function empty(): bool
     {
         return count($this->all()) <= 0;
@@ -119,42 +151,48 @@ abstract class AbstractSettingsManager implements SettingsManagerContract
 
     /**
      * @param string|null $path
-     * @param null $default
-     * @return array|\ArrayAccess|mixed
+     * @param mixed $default
+     * @return mixed
      */
     public function get(?string $path = null, $default = null)
     {
-        return $path ? Arr::get($this->all(), $path, $default) : $this->all();
+        return $path
+            ? Arr::get($this->all(), $path, $default)
+            : $this->all();
     }
 
     /**
      * @param iterable|null $paths
-     * @param null $default
+     * @param mixed $default
      * @return array
      */
     public function getMultiple(?iterable $paths = null, $default = null): array
     {
-        $array = [];
-        $allFlattened = $this->allFlattened();
-        $settingsArray = [];
-        foreach ($allFlattened as $key => $value) {
-            Arr::set($settingsArray, $key, $value);
+        $settings = $this->all();
+        $flattened = static::dotFlatten($settings);
+        $rebuilt  = [];
+        foreach ($flattened as $key => $value) {
+            Arr::set($rebuilt, $key, $value);
         }
+
         if (is_null($paths)) {
-            return $settingsArray;
+            return $rebuilt;
         }
 
+        $result = [];
         foreach ($paths as $path) {
-            Arr::set($array, $path, Arr::get($settingsArray, $path, $default));
+            Arr::set($result, $path, Arr::get($rebuilt, $path, $default));
         }
 
-        return $array;
+        return $result;
     }
 
     /**
+     * Set a single value then persist
+     *
      * @param string $path
-     * @param $value
-     * @return \Glorand\Model\Settings\Contracts\SettingsManagerContract
+     * @param mixed $value
+     * @return SettingsManagerContract
      */
     public function set(string $path, $value): SettingsManagerContract
     {
@@ -165,9 +203,7 @@ abstract class AbstractSettingsManager implements SettingsManagerContract
     }
 
     /**
-     * @param string $path
-     * @param mixed $value
-     * @return \Glorand\Model\Settings\Contracts\SettingsManagerContract
+     * Alias for set()
      */
     public function update(string $path, $value): SettingsManagerContract
     {
@@ -175,25 +211,27 @@ abstract class AbstractSettingsManager implements SettingsManagerContract
     }
 
     /**
+     * Delete a key or clear all
+     *
      * @param string|null $path
-     * @return \Glorand\Model\Settings\Contracts\SettingsManagerContract
+     * @return SettingsManagerContract
      */
     public function delete(?string $path = null): SettingsManagerContract
     {
-        if (!$path) {
+        if ($path === null) {
             $settings = [];
         } else {
             $settings = $this->all();
             Arr::forget($settings, $path);
         }
 
-        $this->apply($settings);
-
-        return $this;
+        return $this->apply($settings);
     }
 
     /**
-     * @return \Glorand\Model\Settings\Contracts\SettingsManagerContract
+     * Clear all settings
+     *
+     * @return SettingsManagerContract
      */
     public function clear(): SettingsManagerContract
     {
@@ -201,8 +239,10 @@ abstract class AbstractSettingsManager implements SettingsManagerContract
     }
 
     /**
+     * Set multiple values at once
+     *
      * @param iterable $values
-     * @return \Glorand\Model\Settings\Contracts\SettingsManagerContract
+     * @return SettingsManagerContract
      */
     public function setMultiple(iterable $values): SettingsManagerContract
     {
@@ -215,8 +255,10 @@ abstract class AbstractSettingsManager implements SettingsManagerContract
     }
 
     /**
+     * Delete multiple paths
+     *
      * @param iterable $paths
-     * @return \Glorand\Model\Settings\Contracts\SettingsManagerContract
+     * @return SettingsManagerContract
      */
     public function deleteMultiple(iterable $paths): SettingsManagerContract
     {
@@ -225,17 +267,28 @@ abstract class AbstractSettingsManager implements SettingsManagerContract
             Arr::forget($settings, $path);
         }
 
-        $this->apply($settings);
-
-        return $this;
+        return $this->apply($settings);
     }
 
     /**
-     * @param  array  $settings
+     * Validate settings against model rules
+     *
+     * @param array $settings
      * @throws \Illuminate\Validation\ValidationException
      */
     protected function validate(array $settings)
     {
-        Validator::make(Arr::wrap($settings), Arr::wrap($this->model->getSettingsRules()))->validate();
+        Validator::make(
+            Arr::wrap($settings),
+            Arr::wrap($this->model->getSettingsRules())
+        )->validate();
     }
+
+    /**
+     * Apply() must be implemented by child classes
+     *
+     * @param array $settings
+     * @return SettingsManagerContract
+     */
+    abstract public function apply(array $settings = []): SettingsManagerContract;
 }
