@@ -4,14 +4,13 @@ namespace App\Traits;
 use Glorand\Model\Settings\Contracts\SettingsManagerContract;
 use Glorand\Model\Settings\Managers\FieldSettingsManager;
 use Glorand\Model\Settings\Exceptions\ModelSettingsException;
-
 trait HasMultipleSettingsFields
 {
     /**
      * List here all JSON columns you want to manage.
      * e.g. ['settings', 'address', 'preferences']
      */
-    public array $settingsFieldNames = ['settings'];
+    public array $embeddables = ['settings'];
 
     /**
      * Whether to auto-persist settings to the model after each change.
@@ -22,7 +21,7 @@ trait HasMultipleSettingsFields
     /**
      * Get the manager for a given settings‐column.
      *
-     * @param string|null $field  Column name; defaults to the first in $settingsFieldNames
+     * @param string|null $field  Column name; defaults to the first in $embeddables
      * @return SettingsManagerContract
      * @throws ModelSettingsException
      */
@@ -31,7 +30,7 @@ trait HasMultipleSettingsFields
         // default to first configured name
         $field = $field ?: $this->getDefaultSettingsFieldName();
 
-        if (!in_array($field, $this->settingsFieldNames, true)) {
+        if (!in_array($field, $this->embeddables, true)) {
             throw new ModelSettingsException("Field [{$field}] is not registered.");
         }
 
@@ -45,7 +44,7 @@ trait HasMultipleSettingsFields
      */
     protected function getDefaultSettingsFieldName(): string
     {
-        return $this->settingsFieldNames[0];
+        return $this->embeddables[0];
     }
 
     /**
@@ -53,7 +52,7 @@ trait HasMultipleSettingsFields
      */
     public function __call($method, $parameters)
     {
-        if (in_array($method, $this->settingsFieldNames, true)) {
+        if (in_array($method, $this->embeddables, true)) {
             return $this->settings($method);
         }
 
